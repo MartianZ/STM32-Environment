@@ -1,0 +1,7 @@
+-I inc/
+-I lib/
+-I lib/inc/core/
+-I lib/inc/peripherals/
+-DSTM32F10X_HD=1
+-DUSE_STDPERIPH_DRIVER=1
+

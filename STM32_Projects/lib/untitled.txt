@@ -1,0 +1,331 @@
+
+/*****************************************************************
+*
+* 文件名: main.c
+* 内容简述: 本程序演示了可调电阻（PC0）的ADC（非DMA)以及过采样技术的使用
+*
+*
+******************************************************************/
+#include "stm32f10x.h"
+#include <stdio.h>
+
+u8 ah,al,comm = 0;
+u16 ad;
+u32 tempu32 = 0;
+
+u8 gototime = 0;
+
+
+/*************************************************
+函数: void RCC_Configuration(void)
+功能: 复位和时钟控制 配置
+参数: 无
+返回: 无
+**************************************************/
+void RCC_Configuration(void)
+{
+  ErrorStatus HSEStartUpStatus;                    //定义外部高速晶体启动状态枚举变量
+  RCC_DeInit();                                    //复位RCC外部设备寄存器到默认值
+  RCC_HSEConfig(RCC_HSE_ON);                       //打开外部高速晶振
+  HSEStartUpStatus = RCC_WaitForHSEStartUp();      //等待外部高速时钟准备好
+  if(HSEStartUpStatus == SUCCESS)                  //外部高速时钟已经准别好
+  {
+    FLASH_PrefetchBufferCmd(FLASH_PrefetchBuffer_Enable); //开启FLASH预读缓冲功能，加速FLASH的读取。所有程序中必须的用法.位置：RCC初始化子函数里面，时钟起振之后
+    FLASH_SetLatency(FLASH_Latency_2);                    //flash操作的延时
+      	
+    RCC_HCLKConfig(RCC_SYSCLK_Div1);               //配置AHB(HCLK)时钟等于==SYSCLK
+    RCC_PCLK2Config(RCC_HCLK_Div1);                //配置APB2(PCLK2)钟==AHB时钟
+    RCC_PCLK1Config(RCC_HCLK_Div2);                //配置APB1(PCLK1)钟==AHB1/2时钟
+         
+    RCC_PLLConfig(RCC_PLLSource_HSE_Div1, RCC_PLLMul_9);  //配置PLL时钟 == 外部高速晶体时钟 * 9 = 72MHz
+    RCC_PLLCmd(ENABLE);                                   //使能PLL时钟
+   
+    while(RCC_GetFlagStatus(RCC_FLAG_PLLRDY) == RESET)    //等待PLL时钟就绪
+    {
+    }
+    RCC_SYSCLKConfig(RCC_SYSCLKSource_PLLCLK);            //配置系统时钟 = PLL时钟
+    while(RCC_GetSYSCLKSource() != 0x08)                  //检查PLL时钟是否作为系统时钟
+    {
+    }
+  }
+
+}
+
+/*******************************************************************************
+	函数名：ADC_Configuration
+	输  入:
+	输  出:
+	功能说明：配置ADC, PA1
+*/
+static void ADC_Configuration(void)
+{
+	GPIO_InitTypeDef GPIO_InitStructure;
+	ADC_InitTypeDef ADC_InitStructure;
+
+    /* 使能 ADC1 and GPIOC clock */
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_ADC1 | RCC_APB2Periph_GPIOA, ENABLE);
+	RCC_ADCCLKConfig(RCC_PCLK2_Div6);              //72M/6=12,ADC最大时间不能超过14M
+
+	/* 配置PA1为模拟输入 */
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_1;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+	/* 配置ADC1, 不用DMA, 用软件自己触发 */
+	ADC_InitStructure.ADC_Mode = ADC_Mode_Independent;		 //ADC1工作模式:独立模式
+	ADC_InitStructure.ADC_ScanConvMode = DISABLE;			 //单通道模式
+	ADC_InitStructure.ADC_ContinuousConvMode = DISABLE;		 //单次转换
+	ADC_InitStructure.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;	  //转换由软件触发启动
+	ADC_InitStructure.ADC_DataAlign = ADC_DataAlign_Right;	 //ADC1数据右对齐
+	ADC_InitStructure.ADC_NbrOfChannel = 1;	   //顺序进行规则转换的ADC通道的数目
+	ADC_Init(ADC1, &ADC_InitStructure);		   //根据ADC_InitStruct中定的参数，初始化外设ADC1的寄存器
+
+
+	ADC_RegularChannelConfig(ADC1, ADC_Channel_1, 1, ADC_SampleTime_239Cycles5);	//ADC1,ADC通道1,规则采样顺序值为1,采样时间为239.5周期
+
+	/* Enable ADC1 */
+	ADC_Cmd(ADC1, ENABLE);		  //使能ADC1
+
+	/* Enable ADC1 reset calibaration register */
+	ADC_ResetCalibration(ADC1);						//重置ADC1的校准寄存器
+	/* Check the end of ADC1 reset calibration register */
+	while(ADC_GetResetCalibrationStatus(ADC1));		//获取ADC1重置校准寄存器的状态,设置状态则等待
+
+	/* Start ADC1 calibaration */
+	ADC_StartCalibration(ADC1);					//开始ADC1的校准状态
+	/* Check the end of ADC1 calibration */
+	while(ADC_GetCalibrationStatus(ADC1));		//等待校准完成
+
+	/* Start ADC1 Software Conversion */
+	ADC_SoftwareStartConvCmd(ADC1, ENABLE);		//使能ADC1的软件转换启动功能
+}
+
+/*******************************************************************************
+* Function Name   : NVIC_Configuration
+* Description        : Configures NVIC and Vector Table base location.
+* Input                    : None
+* Output                 : None
+* Return                 : None
+*******************************************************************************/
+void NVIC_Configuration(void)
+{
+   NVIC_InitTypeDef NVIC_InitStructure;
+  
+   /* Set the Vector Table base location at 0x08000000 */
+   NVIC_SetVectorTable(NVIC_VectTab_FLASH, 0x0);
+  
+   /* Configure the NVIC Preemption Priority Bits */  
+   NVIC_PriorityGroupConfig(NVIC_PriorityGroup_0);				 //中断分组设置
+  
+   /* Enable the USART1 Interrupt */
+   NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
+   NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;	 //指定抢占式优先级别0
+   NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;			 //指定响应优先级别0
+   NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;				 //使能USART1中断
+   NVIC_Init(&NVIC_InitStructure); 
+
+  //配置TIM2中断
+  NVIC_InitStructure.NVIC_IRQChannel = TIM2_IRQn;
+  NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;		 //指定抢占式优先级别1
+  NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;			 //指定响应优先级别1
+  NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;				 //使能TIM2中断
+  NVIC_Init(&NVIC_InitStructure);
+}
+
+/*******************************************************************************
+	函数名：USART_Configuration
+	输  入:
+	输  出:
+	功能说明：
+	初始化串口硬件设备，启用中断
+	配置步骤：
+	(1)打开GPIO和USART的时钟
+	(2)设置USART两个管脚GPIO模式
+	(3)配置USART数据格式、波特率等参数
+	(4)使能USART接收中断功能
+	(5)最后使能USART功能
+*/
+void USART_Configuration(void)
+{
+	GPIO_InitTypeDef GPIO_InitStructure;
+	USART_InitTypeDef USART_InitStructure;
+
+	/* 第1步：打开GPIO和USART部件的时钟 */
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_AFIO, ENABLE);
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
+
+	/* 第2步：将USART Tx的GPIO配置为推挽复用模式 */
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_9;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+	/* 第3步：将USART Rx的GPIO配置为浮空输入模式
+		由于CPU复位后，GPIO缺省都是浮空输入模式，因此下面这个步骤不是必须的
+		但是，我还是建议加上便于阅读，并且防止其它地方修改了这个口线的设置参数
+	*/
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_10;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+	/*  第3步已经做了，因此这步可以不做
+		GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	*/
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+
+	/* 第4步：配置USART参数
+	    - BaudRate = 115200 baud
+	    - Word Length = 8 Bits
+	    - One Stop Bit
+	    - No parity
+	    - Hardware flow control disabled (RTS and CTS signals)
+	    - Receive and transmit enabled
+	*/
+	USART_InitStructure.USART_BaudRate = 115200;
+	USART_InitStructure.USART_WordLength = USART_WordLength_8b;
+	USART_InitStructure.USART_StopBits = USART_StopBits_1;
+	USART_InitStructure.USART_Parity = USART_Parity_No;
+	USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
+	USART_InitStructure.USART_Mode = USART_Mode_Rx | USART_Mode_Tx;
+	USART_Init(USART1, &USART_InitStructure);
+
+    /* 若接收数据寄存器满，则产生中断 */
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+
+	/* 第5步：使能 USART， 配置完毕 */
+	USART_Cmd(USART1, ENABLE);
+
+    /* 如下语句解决第1个字节无法正确发送出去的问题 */
+    USART_ClearFlag(USART1, USART_FLAG_TC);     // 清标志
+}
+
+/*************************************************
+函数: void Timer2_Configuration(void)
+功能: TIM2 配置
+参数: 无
+返回: 无
+定时计算：(1 /(72 / (36 - 1 + 1))) * 781 us = 390.5us
+**************************************************/
+void Timer2_Configuration(void)
+{
+  TIM_TimeBaseInitTypeDef   TIM_TimeBaseStructure;
+    
+  RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE);	    //打开TIM2定时器的时钟
+  
+  
+  TIM_DeInit(TIM2);		                                    //TIMx寄存器重设为缺省值
+  
+  TIM_TimeBaseStructure.TIM_Period = 781;		            //自动重装载寄存器周期的值
+  TIM_TimeBaseStructure.TIM_Prescaler=36 - 1;               //TIMx 时钟频率除数的预分频值
+  TIM_TimeBaseStructure.TIM_ClockDivision=TIM_CKD_DIV1;     //采样分频
+  TIM_TimeBaseStructure.TIM_CounterMode=TIM_CounterMode_Up; //向上计数模式
+  TIM_TimeBaseInit(TIM2, &TIM_TimeBaseStructure);
+  
+  TIM_ARRPreloadConfig(TIM2, ENABLE);                       //允许自动重装载寄存器（ARR）
+  TIM_ITConfig(TIM2,TIM_IT_Update,ENABLE);	                //允许TIM2溢出中断
+  
+  TIM_Cmd(TIM2, ENABLE);	                                //开启时钟 
+}
+
+/*******************************************************************/
+/*                                                                 */
+/* STM32向串口发送1字节                                            */
+/*                                                                 */
+/*                                                                 */
+/*******************************************************************/
+void Uart1_PutChar(u8 ch)
+{
+  USART_SendData(USART1, (u8) ch);
+  while(USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
+}
+
+/*******************************************************************/
+/*                                                                 */
+/* STM32在串口接收1字节                                            */
+/* 说明：串口接收中断                                              */
+/*                                                                 */
+/*******************************************************************/
+void USART1_IRQHandler(void)            //在中断服务程序中，由于主机响应中断时并不知道是哪个中断源发出中断请求，因此必须在中断服务程序中对中断源进行判别，然后分别进行处理。当然，如果只涉及到一个中断请求，是不用做上述判别的。但是无论什么情况，做上述判别是个好习惯
+{ 
+  if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)    //若接收数据寄存器满
+  {     
+    comm = USART_ReceiveData(USART1);   //此语句作用：将USART_DR寄存器的内容传到comm里。另外,在单缓冲器模式下，软件读USART_DR寄存器则完成对RXNE位清除。[注意]在多缓冲器模式下，必须通过软件清零"传输完成标志"DMA1_FLAG_TCx(即：令DMA_IFCR的位CTCIFx=1)，否则将会无法跳出中断服务程序，出现一次中断请求无数次响应的后果
+    
+	if(comm == 0x63)                    //上位机自动查找采集器是否在线
+	{  			
+	  comm = 0;      
+      Uart1_PutChar(0x63);              //发送CP的ASCII码
+      Uart1_PutChar(0x70);                              			  
+	}  
+  }
+}
+
+/*************************************************
+函数: void TIM2_IRQHandler(void)
+功能: TIM2中断处理函数
+参数: 无
+返回: 无
+说明：390.5us中断1次
+**************************************************/
+void TIM2_IRQHandler(void)
+{
+   if(TIM_GetITStatus(TIM2,TIM_IT_Update)!=RESET)
+   {      
+      TIM_ClearITPendingBit(TIM2,TIM_IT_Update);	 //清除中断标志
+      gototime = 1;
+   }
+} 
+
+/*************************************************
+函数: int main(void)
+功能: main主函数
+参数: 无
+返回: 无
+**************************************************/
+int main(void)
+{
+  u16 i;
+
+  RCC_Configuration();
+  ADC_Configuration();	    //配置PC0 为ADC1_IN10
+  NVIC_Configuration();
+  USART_Configuration();
+  Timer2_Configuration();
+
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOC, ENABLE);
+	GPIO_InitTypeDef GPIO_InitStructure;
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7 | GPIO_Pin_6;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(GPIOC, &GPIO_InitStructure);	
+  while(1)
+  {
+  
+GPIO_SetBits(GPIOC, GPIO_Pin_6);
+GPIO_ResetBits(GPIOC, GPIO_Pin_7);
+delay_ms(300);
+GPIO_ResetBits(GPIOC, GPIO_Pin_6);
+GPIO_SetBits(GPIOC, GPIO_Pin_7);
+delay_ms(300);
+      for(i = 0;i < 256;i++)                    //根据过采样技术，每提高一位AD分辨率，需要增加4倍的采样率；从12位AD分辨率增加到16位AD分辨率，即增加4位，所以需要增加256倍的采样率 
+      {
+        gototime = 0;
+        TIM_Cmd(TIM2, ENABLE);	                        //开启时钟
+	    ADC_SoftwareStartConvCmd(ADC1, ENABLE);	        //软件启动ADC转换
+	    while(!ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC )); //等待转换结束
+	    ad = 0;
+		ad = ADC_GetConversionValue(ADC1);		        //读取ADC值                     
+        tempu32 += ad;  	                            //累加 	
+        while(gototime == 0);					        //延时：390.5us。采样率：10/秒
+        TIM_Cmd(TIM2, DISABLE);	                        //关闭时钟
+      } 
+   		  	
+      ad = tempu32 >> 8;                        //16位分辨率,累加值右移4位 
+      ah = ad >> 8;					            //高8位
+      al = ad & 0xff;           		        //低8位
+      Uart1_PutChar(ah); 						//因为这里的串口发送函数采用了查询方式，会占用时间，导致采样率不准。所以我们可采用串口DMA发送方式，改进这个问题
+      Uart1_PutChar(al); 
+	                    
+      tempu32 = 0;                                  		     
+  }
+}

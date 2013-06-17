@@ -15,3 +15,9 @@
 *.exe
 *.out
 *.app
+*.elf
+*.bin
+*.hex
+
+nbproject
+.DS_Store
